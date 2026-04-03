@@ -237,7 +237,7 @@ function PeriodFilter({ value, onChange }) {
     { id:"all",    label:"All time" },
   ];
   return (
-    <div style={{ display:"flex", background:"#f3f4f6", borderRadius:12, padding:3, gap:2, marginBottom:16 }}>
+    <div style={{ display:"flex", background:"#f3f4f6", borderRadius:12, padding:3, gap:2, marginBottom:8 }}>
       {opts.map(o=>(
         <button key={o.id} onClick={()=>onChange(o.id)}
           style={{ flex:1, padding:"8px 4px", borderRadius:9, border:"none", cursor:"pointer", fontSize:12, fontWeight:700,
@@ -248,6 +248,22 @@ function PeriodFilter({ value, onChange }) {
           {o.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+function PeriodNav({ period, label, index, total, onPrev, onNext }) {
+  if (period === "all" || total <= 1) return null;
+  return (
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"8px 12px" }}>
+      <button onClick={onNext} disabled={index >= total-1}
+        style={{ background:"none", border:"none", fontSize:20, cursor:index>=total-1?"default":"pointer", color:index>=total-1?"#d1d5db":"#2563eb", fontWeight:700, padding:"0 4px" }}>‹</button>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:13, fontWeight:700, color:"#111827" }}>{label}</div>
+        <div style={{ fontSize:10, color:"#9ca3af", marginTop:1 }}>{total - index} of {total}</div>
+      </div>
+      <button onClick={onPrev} disabled={index <= 0}
+        style={{ background:"none", border:"none", fontSize:20, cursor:index<=0?"default":"pointer", color:index<=0?"#d1d5db":"#2563eb", fontWeight:700, padding:"0 4px" }}>›</button>
     </div>
   );
 }
@@ -553,9 +569,29 @@ const FARD_STATUSES_F_FULL = [
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
 function AppShell() {
-  // No login — each person's data stored locally on their device
-  const authUser = { username: "user", isGuest: false };
-  const handleLogout = () => {};
+  const [authUser, setAuthUser] = useState(null); // null | {username, isGuest}
+
+  // Check for saved session
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("dd_session");
+      if (saved) setAuthUser(JSON.parse(saved));
+    } catch {}
+  }, []);
+
+  const handleLogin = (user) => {
+    setAuthUser(user);
+    if (!user.isGuest) {
+      try { localStorage.setItem("dd_session", JSON.stringify(user)); } catch {}
+    }
+  };
+
+  const handleLogout = () => {
+    try { localStorage.removeItem("dd_session"); } catch {}
+    setAuthUser(null);
+  };
+
+  if (!authUser) return <LoginScreen onLogin={handleLogin}/>;
   return <App authUser={authUser} onLogout={handleLogout}/>;
 }
 
@@ -659,9 +695,15 @@ function App({ authUser, onLogout }) {
     const SVG = FARD_SVG[prayerId];
     const statusId = dayLog[prayerId] || null;
     const st = fardStat.find(s => s.id === statusId);
+    // Glow color per status
+    const GLOW = { masjid:"rgba(37,99,235,0.25)", jamaah:"rgba(62,207,142,0.25)", prayed_ontime:"rgba(245,166,35,0.2)", prayed_late:"rgba(229,72,77,0.2)", not_prayed:"rgba(17,24,39,0.15)", excused:"rgba(173,181,189,0.2)" };
+    const glowColor = statusId ? GLOW[statusId] : null;
+    const borderColor = statusId ? st?.bg+"55" : "#e5e7eb";
     return (
       <div onClick={() => setModal({ type: "fard", id: prayerId })}
-        style={{ display: "flex", alignItems: "center", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, marginBottom: 8, cursor: "pointer", overflow: "hidden", minHeight: 62 }}>
+        style={{ display: "flex", alignItems: "center", background: "#fff", border: `1px solid ${borderColor}`, borderRadius: 16, marginBottom: 8, cursor: "pointer", overflow: "hidden", minHeight: 62,
+          boxShadow: glowColor ? `0 4px 20px ${glowColor}, 0 1px 4px rgba(0,0,0,0.04)` : "0 1px 3px rgba(0,0,0,0.04)",
+          transition: "box-shadow 0.3s ease, border-color 0.3s ease" }}>
         <div style={{ display: "flex", alignItems: "center", flex: 1, padding: "0 14px" }}>
           <SVG /><span style={{ fontSize: 16, fontWeight: 600, color: "#111827", marginLeft: 12 }}>{FARD.find(f => f.id === prayerId).name}</span>
         </div>
@@ -1010,24 +1052,74 @@ function App({ authUser, onLogout }) {
   // ── Stats ─────────────────────────────────────────────────────────────
   const Stats = () => {
     const [statsPeriod, setStatsPeriod] = useState("all"); // weeks|months|years|all
-    const [detailView, setDetailView]   = useState(null);  // null | "fard" | "rawatib" | deedId
+    const [periodIndex, setPeriodIndex] = useState(0);     // 0 = most recent, 1 = one before, etc.
+    const [detailView, setDetailView]   = useState(null);
 
     const allKeys = Object.keys(logs).sort();
-
-    // Filter keys by period
     const now = new Date();
-    const filteredKeys = allKeys.filter(k => {
-      const d = new Date(k);
-      if (statsPeriod === "weeks")  return (now - d) <= 7  * 86400000;
-      if (statsPeriod === "months") return (now - d) <= 30 * 86400000;
-      if (statsPeriod === "years")  return (now - d) <= 365* 86400000;
-      return true;
-    });
+
+    // Build swipeable period buckets
+    const getPeriodBuckets = () => {
+      if (statsPeriod === "all") return [allKeys];
+      const buckets = [];
+      const sorted = [...allKeys].sort().reverse();
+      if (statsPeriod === "weeks") {
+        // Group by ISO week
+        const weekMap = {};
+        sorted.forEach(k => {
+          const d = new Date(k);
+          const startOfWeek = new Date(d);
+          startOfWeek.setDate(d.getDate() - d.getDay());
+          const wk = startOfWeek.toISOString().split("T")[0];
+          if (!weekMap[wk]) weekMap[wk] = [];
+          weekMap[wk].push(k);
+        });
+        Object.keys(weekMap).sort().reverse().forEach(wk => buckets.push(weekMap[wk]));
+      } else if (statsPeriod === "months") {
+        const monthMap = {};
+        sorted.forEach(k => {
+          const mo = k.slice(0, 7); // "2025-01"
+          if (!monthMap[mo]) monthMap[mo] = [];
+          monthMap[mo].push(k);
+        });
+        Object.keys(monthMap).sort().reverse().forEach(mo => buckets.push(monthMap[mo]));
+      } else if (statsPeriod === "years") {
+        const yearMap = {};
+        sorted.forEach(k => {
+          const yr = k.slice(0, 4);
+          if (!yearMap[yr]) yearMap[yr] = [];
+          yearMap[yr].push(k);
+        });
+        Object.keys(yearMap).sort().reverse().forEach(yr => buckets.push(yearMap[yr]));
+      }
+      return buckets.length ? buckets : [[]];
+    };
+
+    const buckets = getPeriodBuckets();
+    const clampedIndex = Math.min(periodIndex, buckets.length - 1);
+    const filteredKeys = buckets[clampedIndex] || [];
+
+    // Period label for current bucket
+    const getPeriodLabel = () => {
+      if (statsPeriod === "all") return "All time";
+      if (!filteredKeys.length) return "";
+      const first = filteredKeys[filteredKeys.length - 1];
+      const last  = filteredKeys[0];
+      if (statsPeriod === "weeks") {
+        const d = new Date(first);
+        return d.toLocaleDateString("en-GB", { day:"numeric", month:"short" }) + " – " + new Date(last).toLocaleDateString("en-GB", { day:"numeric", month:"short" });
+      }
+      if (statsPeriod === "months") return new Date(first).toLocaleDateString("en-GB", { month:"long", year:"numeric" });
+      if (statsPeriod === "years")  return first.slice(0, 4);
+      return "";
+    };
+
+    const handlePeriodChange = (p) => { setStatsPeriod(p); setPeriodIndex(0); };
 
     const total = filteredKeys.length || 1;
 
     // Status counts across all fard prayers
-    const statusCounts = { jamaah:0, prayed_ontime:0, prayed_late:0, not_prayed:0, excused:0 };
+    const statusCounts = { masjid:0, jamaah:0, prayed_ontime:0, prayed_late:0, not_prayed:0, excused:0 };
     filteredKeys.forEach(k => {
       FARD.forEach(p => {
         const s = logs[k][p.id];
@@ -1145,35 +1237,31 @@ function App({ authUser, onLogout }) {
           </div>
 
           {/* Period filter */}
-          <PeriodFilter value={statsPeriod} onChange={setStatsPeriod}/>
+          <PeriodFilter value={statsPeriod} onChange={handlePeriodChange}/>
 
           {/* Status summary grid */}
           <div style={{ fontSize:11, fontWeight:700, color:"#6b7280", textTransform:"uppercase", letterSpacing:1.2, marginBottom:10 }}>STATUS SUMMARY</div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:16 }}>
+          <div style={{ display:"flex", gap:8, marginBottom:16, overflowX:"auto", paddingBottom:4 }}>
             {[
-              { id:"jamaah",       label:"In jamaah",  color:"#3ecf8e", icon:"group"  },
-              { id:"prayed_ontime",label:"On time",    color:"#f5a623", icon:"person" },
-              { id:"prayed_late",  label:"Late",       color:"#e5484d", icon:"late"   },
-              { id:"not_prayed",   label:"Not prayed", color:"#111827", icon:"block"  },
+              { id:"masjid",       label:"Masjid",  color:"#2563eb", icon:"masjid" },
+              { id:"jamaah",       label:"Jamaah",  color:"#3ecf8e", icon:"group"  },
+              { id:"prayed_ontime",label:"On time", color:"#f5a623", icon:"person" },
+              { id:"prayed_late",  label:"Late",    color:"#e5484d", icon:"late"   },
+              { id:"not_prayed",   label:"Missed",  color:"#111827", icon:"block"  },
             ].map(s=>{
               const count = filteredKeys.reduce((a,k)=>a+FARD.filter(p=>logs[k]?.[p.id]===s.id).length,0);
               const pct   = totalSlots ? Math.round(count/totalSlots*100) : 0;
               const bars  = Math.min(4, Math.ceil(pct/25));
               return(
-                <div key={s.id} style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, padding:"14px 12px" }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                    <div>
-                      <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
-                        <BadgeSmall icon={s.icon} bg={s.color}/>
-                        <span style={{ fontSize:12, fontWeight:600, color:"#6b7280" }}>{s.label}</span>
-                      </div>
-                      <div style={{ fontSize:28, fontWeight:900, color:"#111827" }}>{pct}%</div>
-                      <div style={{ fontSize:12, color:"#9ca3af", marginTop:2 }}>{count} times</div>
-                      <div style={{ fontSize:11, color:"#9ca3af", marginTop:4 }}>— Not applicable</div>
-                    </div>
-                    <div style={{ display:"flex", flexDirection:"column", gap:3, paddingTop:4 }}>
-                      {[0,1,2,3].map(i=><div key={i} style={{ width:28, height:6, borderRadius:3, background: i<bars ? s.color : "#e5e7eb" }}/>)}
-                    </div>
+                <div key={s.id} style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, padding:"14px 12px", minWidth:100, flex:"0 0 auto" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+                    <BadgeSmall icon={s.icon} bg={s.color}/>
+                    <span style={{ fontSize:11, fontWeight:600, color:"#6b7280" }}>{s.label}</span>
+                  </div>
+                  <div style={{ fontSize:24, fontWeight:900, color:"#111827" }}>{pct}%</div>
+                  <div style={{ fontSize:11, color:"#9ca3af", marginTop:2 }}>{count}×</div>
+                  <div style={{ display:"flex", gap:2, marginTop:8 }}>
+                    {[0,1,2,3].map(i=><div key={i} style={{ width:16, height:5, borderRadius:3, background: i<bars ? s.color : "#e5e7eb" }}/>)}
                   </div>
                 </div>
               );
@@ -1250,7 +1338,8 @@ function App({ authUser, onLogout }) {
             </div>
           </div>
 
-          <PeriodFilter value={statsPeriod} onChange={setStatsPeriod}/>
+          <PeriodFilter value={statsPeriod} onChange={handlePeriodChange}/>
+          <PeriodNav period={statsPeriod} label={getPeriodLabel()} index={clampedIndex} total={buckets.length} onPrev={()=>setPeriodIndex(i=>Math.max(0,i-1))} onNext={()=>setPeriodIndex(i=>Math.min(buckets.length-1,i+1))}/>
 
           <div style={{ fontSize:11, fontWeight:700, color:"#6b7280", textTransform:"uppercase", letterSpacing:1.2, marginBottom:10 }}>PRAYER SUMMARY</div>
           {rbStats.map(rb=>(
@@ -1319,7 +1408,8 @@ function App({ authUser, onLogout }) {
                 <span>{Math.round(maxVal/2)}</span><span>0</span>
               </div>
             </div>
-            <PeriodFilter value={statsPeriod} onChange={setStatsPeriod}/>
+            <PeriodFilter value={statsPeriod} onChange={handlePeriodChange}/>
+            <PeriodNav period={statsPeriod} label={getPeriodLabel()} index={clampedIndex} total={buckets.length} onPrev={()=>setPeriodIndex(i=>Math.max(0,i-1))} onNext={()=>setPeriodIndex(i=>Math.min(buckets.length-1,i+1))}/>
             <div style={{ fontSize:11, fontWeight:700, color:"#6b7280", textTransform:"uppercase", letterSpacing:1.2, marginBottom:10 }}>STATUS SUMMARY</div>
             <Semicircle pct={Math.round(completed/total2*100)} color="#3ecf8e" count={completed} label="Since starting the deed"/>
             <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, overflow:"hidden" }}>
@@ -1361,7 +1451,7 @@ function App({ authUser, onLogout }) {
               })}
             </div>
           </div>
-          <PeriodFilter value={statsPeriod} onChange={setStatsPeriod}/>
+          <PeriodFilter value={statsPeriod} onChange={handlePeriodChange}/>
           <div style={{ fontSize:11, fontWeight:700, color:"#6b7280", textTransform:"uppercase", letterSpacing:1.2, marginBottom:10 }}>STATUS SUMMARY</div>
           <Semicircle pct={ds.pct} color={arcColor} count={ds.done} label="Since starting the deed"/>
           <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, overflow:"hidden" }}>
@@ -1417,35 +1507,32 @@ function App({ authUser, onLogout }) {
         </div>
 
         {/* Period filter */}
-        <PeriodFilter value={statsPeriod} onChange={setStatsPeriod}/>
+        <PeriodFilter value={statsPeriod} onChange={handlePeriodChange}/>
+        <PeriodNav period={statsPeriod} label={getPeriodLabel()} index={clampedIndex} total={buckets.length} onPrev={()=>setPeriodIndex(i=>Math.max(0,i-1))} onNext={()=>setPeriodIndex(i=>Math.min(buckets.length-1,i+1))}/>
 
         {/* Status summary grid */}
         <div style={{ fontSize:11, fontWeight:700, color:"#6b7280", textTransform:"uppercase", letterSpacing:1.2, marginBottom:10 }}>STATUS SUMMARY</div>
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:20 }}>
+        <div style={{ display:"flex", gap:8, marginBottom:20, overflowX:"auto", paddingBottom:4 }}>
           {[
-            { id:"jamaah",       label:"In jamaah",  color:"#3ecf8e", icon:"group"  },
+            { id:"masjid",       label:"Masjid",     color:"#2563eb", icon:"masjid" },
+            { id:"jamaah",       label:"Jamaah",     color:"#3ecf8e", icon:"group"  },
             { id:"prayed_ontime",label:"On time",    color:"#f5a623", icon:"person" },
             { id:"prayed_late",  label:"Late",       color:"#e5484d", icon:"late"   },
-            { id:"not_prayed",   label:"Not prayed", color:"#111827", icon:"block"  },
+            { id:"not_prayed",   label:"Missed",     color:"#111827", icon:"block"  },
           ].map(s=>{
             const count = filteredKeys.reduce((a,k)=>a+FARD.filter(p=>logs[k]?.[p.id]===s.id).length,0);
             const pct   = totalSlots2 ? Math.round(count/totalSlots2*100) : 0;
             const bars  = Math.min(4, Math.ceil(pct/25));
             return(
-              <div key={s.id} style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, padding:"14px 12px" }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                  <div>
-                    <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
-                      <BadgeSmall icon={s.icon} bg={s.color}/>
-                      <span style={{ fontSize:12, fontWeight:600, color:"#6b7280" }}>{s.label}</span>
-                    </div>
-                    <div style={{ fontSize:28, fontWeight:900, color:"#111827" }}>{pct}%</div>
-                    <div style={{ fontSize:12, color:"#9ca3af", marginTop:2 }}>{count} times</div>
-                    <div style={{ fontSize:11, color:"#9ca3af", marginTop:4 }}>— Not applicable</div>
-                  </div>
-                  <div style={{ display:"flex", flexDirection:"column", gap:3, paddingTop:4 }}>
-                    {[0,1,2,3].map(i=><div key={i} style={{ width:28, height:6, borderRadius:3, background: i<bars ? s.color : "#e5e7eb" }}/>)}
-                  </div>
+              <div key={s.id} style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, padding:"14px 12px", minWidth:100, flex:"0 0 auto" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+                  <BadgeSmall icon={s.icon} bg={s.color}/>
+                  <span style={{ fontSize:11, fontWeight:600, color:"#6b7280" }}>{s.label}</span>
+                </div>
+                <div style={{ fontSize:24, fontWeight:900, color:"#111827" }}>{pct}%</div>
+                <div style={{ fontSize:11, color:"#9ca3af", marginTop:2 }}>{count}×</div>
+                <div style={{ display:"flex", gap:2, marginTop:8 }}>
+                  {[0,1,2,3].map(i=><div key={i} style={{ width:16, height:5, borderRadius:3, background: i<bars ? s.color : "#e5e7eb" }}/>)}
                 </div>
               </div>
             );
@@ -1865,7 +1952,11 @@ function App({ authUser, onLogout }) {
           Logged in as <b>{authUser.isGuest?"Guest":authUser.username}</b>
         </div>
       </div>
-      <div style={{ fontSize:11, color:"#9ca3af", textAlign:"center", marginTop:4 }}>Your data is saved on this device only</div>
+      <button onClick={onLogout} style={{ width:"100%", padding:"14px", borderRadius:14,
+        background:"#fef2f2", border:"1px solid #fecaca", color:"#e05c5c",
+        fontSize:15, fontWeight:700, cursor:"pointer" }}>
+        {authUser.isGuest ? "Exit Guest Mode" : "Logout"}
+      </button>
     </div>
   );
 
